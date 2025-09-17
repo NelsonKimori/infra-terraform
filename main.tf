@@ -1,96 +1,93 @@
-terraform {
-  required_providers {
-    aws = { source = "hashicorp/aws" }
-    random = { source = "hashicorp/random" }
-    aws_sns = {
-      source  = "hashicorp/aws"
-      version = ">= 3.0"
-    }
-  }
-  required_version = ">= 1.0"
-}
-
 provider "aws" {
   region = "us-east-1"
 }
 
-resource "random_pet" "name" {}
+resource "random_pet" "name" {
+  length    = 2
+  separator = "-"
+}
 
+#  Main S3 bucket
 resource "aws_s3_bucket" "demo" {
   bucket = "devsecops-demo-${random_pet.name.id}"
+
   tags = {
     Name = "devsecops-demo"
   }
+
   versioning {
     enabled = true
   }
-  bucket_acl = "private"
+
   lifecycle_rule {
-    id = "demo_rule"
+    id      = "demo_rule"
     enabled = true
   }
+
+  acl = "private"
 }
 
-resource "aws_s3_bucket_public_access_block" "demo" {
-  bucket = aws_s3_bucket.demo.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
+#  Replica bucket (for cross-region replication)
+resource "aws_s3_bucket" "replica" {
+  bucket = "devsecops-demo-replica-${random_pet.name.id}"
+  acl    = "private"
+  region = "us-west-2"
 }
 
-resource "aws_s3_bucket_server_side_encryption_configuration" "demo" {
+#  IAM Role for replication
+resource "aws_iam_role" "replication" {
+  name = "s3-replication-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = {
+        Service = "s3.amazonaws.com"
+      }
+    }]
+  })
+}
+
+#  Replication configuration
+resource "aws_s3_bucket_replication_configuration" "demo" {
+  depends_on = [aws_s3_bucket.demo, aws_s3_bucket.replica]
+
   bucket = aws_s3_bucket.demo.id
+  role   = aws_iam_role.replication.arn
+
   rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+    id     = "replication-rule"
+    status = "Enabled"
+
+    destination {
+      bucket        = aws_s3_bucket.replica.arn
+      storage_class = "STANDARD"
     }
   }
 }
 
-resource "aws_s3_bucket_logging" "demo_log" {
-  bucket = aws_s3_bucket.demo.id
-  target_bucket = "devsecops-demo-log-bucket"
-  target_prefix = "log/"
-}
-
-# Fix 1: Ensure rotation for KMS key is enabled
+#  KMS Key
 resource "aws_kms_key" "demo" {
-  description             = "KMS key for devsecops demo S3 bucket"
-  deletion_window_in_days = 7
-  enable_key_rotation     = true  # <-- FIX IS HERE
+  description             = "KMS key for DevSecOps demo"
+  deletion_window_in_days = 10
 }
 
-# Fix 2: Ensure an S3 bucket has event notifications enabled
-resource "aws_sns_topic" "demo" {
-  name = "devsecops-demo-s3-events"
-}
-
-resource "aws_s3_bucket_notification" "demo" {
+#  Encrypt S3 with KMS
+resource "aws_s3_bucket_server_side_encryption_configuration" "demo" {
   bucket = aws_s3_bucket.demo.id
-  topic {
-    topic_arn = aws_sns_topic.demo.arn
-    events    = ["s3:ObjectCreated:*"]
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.demo.arn
+    }
   }
 }
 
-# Fix 3: Ensure KMS key Policy is defined
-resource "aws_kms_key_policy" "demo" {
-  key_id = aws_kms_key.demo.id
-  policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [
-      {
-        Sid       = "Allow administration of the key",
-        Effect    = "Allow",
-        Principal = {
-          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" # You can use a more specific IAM principal here
-        },
-        Action    = "kms:*",
-        Resource  = "*"
-      }
-    ]
-  })
+#  SNS Topic with KMS encryption
+resource "aws_sns_topic" "demo" {
+  name              = "devsecops-demo-s3-events"
+  kms_master_key_id = aws_kms_key.demo.arn
 }
-
-data "aws_caller_identity" "current" {}
