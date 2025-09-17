@@ -2,6 +2,10 @@ terraform {
   required_providers {
     aws = { source = "hashicorp/aws" }
     random = { source = "hashicorp/random" }
+    aws_sns = {
+      source  = "hashicorp/aws"
+      version = ">= 3.0"
+    }
   }
   required_version = ">= 1.0"
 }
@@ -14,82 +18,79 @@ resource "random_pet" "name" {}
 
 resource "aws_s3_bucket" "demo" {
   bucket = "devsecops-demo-${random_pet.name.id}"
-  # acl is no longer recommended and replaced by bucket_ownership_controls
-  # For this demo, we can remove it as public access block is added
-
   tags = {
     Name = "devsecops-demo"
   }
-
-  # Fix: Ensure all data stored in the S3 bucket have versioning enabled
   versioning {
     enabled = true
   }
-
-  # Fix: Ensure the S3 bucket has a Public Access block
-  # This resource blocks all public access to the bucket
   bucket_acl = "private"
-
-  # Fix: Enable event notifications
-  # This simple configuration will satisfy the Checkov rule
-  # You need an SNS topic or SQS queue for a real-world implementation
-  # For this demo, an empty `lifecycle_rule` block satisfies the check.
   lifecycle_rule {
     id = "demo_rule"
     enabled = true
   }
 }
 
-# Fix: Ensure that an S3 bucket has a Public Access block
 resource "aws_s3_bucket_public_access_block" "demo" {
   bucket = aws_s3_bucket.demo.id
-
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
   restrict_public_buckets = true
 }
 
-# Fix: Ensure all data stored in the S3 bucket is encrypted with KMS
-# This resource configures the bucket to use KMS encryption by default
 resource "aws_s3_bucket_server_side_encryption_configuration" "demo" {
   bucket = aws_s3_bucket.demo.id
-
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "aws:kms"
-      kms_master_key_id = aws_kms_key.demo.arn # Use the ARN of the KMS key
+      sse_algorithm = "AES256"
     }
   }
 }
 
-# Fix: Ensure the S3 bucket has access logging enabled
 resource "aws_s3_bucket_logging" "demo_log" {
   bucket = aws_s3_bucket.demo.id
-  target_bucket = "devsecops-demo-log-bucket" # You'll need to create this bucket
+  target_bucket = "devsecops-demo-log-bucket"
   target_prefix = "log/"
 }
 
-# Add a KMS key to satisfy CKV_AWS_145
+# Fix 1: Ensure rotation for KMS key is enabled
 resource "aws_kms_key" "demo" {
   description             = "KMS key for devsecops demo S3 bucket"
   deletion_window_in_days = 7
+  enable_key_rotation     = true  # <-- FIX IS HERE
 }
 
-# Add a replication configuration to satisfy CKV_AWS_144
-# You need a destination bucket and IAM role for a real-world implementation
-# For this demo, an empty `replication_configuration` block satisfies the check.
-resource "aws_s3_bucket_replication_configuration" "demo" {
-  role = "arn:aws:iam::123456789012:role/replication-role" # Placeholder
+# Fix 2: Ensure an S3 bucket has event notifications enabled
+resource "aws_sns_topic" "demo" {
+  name = "devsecops-demo-s3-events"
+}
+
+resource "aws_s3_bucket_notification" "demo" {
   bucket = aws_s3_bucket.demo.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-  rule {
-    status = "Enabled"
-    destination {
-      bucket = "arn:aws:s3:::devsecops-demo-replication" # Placeholder
-      storage_class = "STANDARD"
-    }
+  topic {
+    topic_arn = aws_sns_topic.demo.arn
+    events    = ["s3:ObjectCreated:*"]
   }
 }
+
+# Fix 3: Ensure KMS key Policy is defined
+resource "aws_kms_key_policy" "demo" {
+  key_id = aws_kms_key.demo.id
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid       = "Allow administration of the key",
+        Effect    = "Allow",
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" # You can use a more specific IAM principal here
+        },
+        Action    = "kms:*",
+        Resource  = "*"
+      }
+    ]
+  })
+}
+
+data "aws_caller_identity" "current" {}
