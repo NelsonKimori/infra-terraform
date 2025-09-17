@@ -1,6 +1,10 @@
 name: IaC security scan
 on: [push, pull_request]
 
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   checkov:
     runs-on: ubuntu-latest
