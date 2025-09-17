@@ -1,0 +1,14 @@
+name: IaC security scan
+on: [push, pull_request]
+
+jobs:
+  checkov:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install checkov
+        run: python -m pip install --upgrade pip && pip install checkov
+
+      - name: Run checkov
+        run: checkov -d . || exit 1
